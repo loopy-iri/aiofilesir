@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Generic, Literal, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 FileEntryType = Literal["folder", "image", "text", "audio", "video", "pdf"]
 UploadMode = Literal["single", "s3-single", "s3-multipart", "tus"]
@@ -58,6 +58,26 @@ class FileEntry(_Base):
     updated_at: str | None = None
     path: str | None = None
     users: list[FileEntryUserStub] | None = None
+
+    @field_validator("thumbnail", mode="before")
+    @classmethod
+    def _coerce_thumbnail(cls, value: Any) -> Any:
+        # Files.ir / Liara برای فایل‌هایی که thumbnail ندارند `false` (bool)
+        # برمی‌گرداند. ما همان را به None ترجمه می‌کنیم تا تایپ str | None
+        # حفظ شود.
+        if value is False or value is True:
+            return None
+        return value
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _coerce_type(cls, value: Any) -> Any:
+        # سرور بعضاً تایپ‌های اضافی (مثلاً archive یا application) برمی‌گرداند که
+        # توی Literal ما نیستند. به None تبدیل می‌کنیم تا parse با خطا متوقف نشود.
+        allowed = {"folder", "image", "text", "audio", "video", "pdf"}
+        if isinstance(value, str) and value not in allowed:
+            return None
+        return value
 
 
 FileEntry.model_rebuild()
