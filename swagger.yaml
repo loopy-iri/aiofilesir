@@ -1,0 +1,2656 @@
+openapi: 3.0.0
+info:
+  description: 'Access token should be sent along with every request to Files.ir API in authorization header: `Authorization: Bearer <Token>` <br> This token can either be acquired via `auth/login` endpoint or by going to account settings > developers on [Files.ir website](SITE_URL/account-settings/#developers).'
+  version: '1.0.0'
+  title: Files.ir API
+security:
+  - accessToken: []
+tags:
+  - name: Uploads
+    description: Upload files to Files.ir
+  - name: Uploads-new
+    description: Session based upload flow for API clients, including large S3 multipart uploads
+  - name: Auth
+    description: Authenticate requests to the API
+  - name: Files and Folders
+    description: FileEntry refers to either a file or folder on Files.ir
+  - name: Storage
+    description: Storage usage and limits for current user
+  - name: Sharing
+    description: Manage file entry collaborators
+  - name: Starring
+    description: Mark or unmark entries as starred
+  - name: Shareable Links
+    description: Manage shareable links for file or folder
+  - name: Workspaces
+    description: Manage collaborative workspaces
+  - name: Tags
+    description: Manage tags and taggable relationships
+paths:
+  /user/space-usage:
+    get:
+      tags:
+        - Storage
+      summary: Get current user storage usage
+      description: Returns allowed storage, used storage, and remaining storage for the authenticated user. All values are in bytes.
+      operationId: spaceUsage
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  used:
+                    type: integer
+                    format: int64
+                    example: 3793236
+                    description: Used bytes
+                  available:
+                    type: integer
+                    format: int64
+                    example: 2147483648
+                    description: Total allowed bytes (null for unlimited)
+                    nullable: true
+                  remaining:
+                    type: integer
+                    format: int64
+                    example: 2143680412
+                    description: Remaining bytes (null for unlimited)
+                    nullable: true
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /uploads:
+    post:
+      tags:
+        - Uploads
+      summary: Upload a file to Files.ir
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Content of file to upload to Files.ir
+                parentId:
+                  type: integer
+                  description: ID of folder where this file should be uploaded, `null` will upload to root
+                  example: null
+                workspaceId:
+                  type: integer
+                  description: ID of workspace where this file should be uploaded. If omitted or `0`, upload goes to personal drive.
+                  example: 123
+                relativePath:
+                  type: string
+                  description: "Folders in the path provided here will be auto created, if they don't exist already. This is mainly useful when uploading a folder from browser. It should include original filename as well: <br> `/some/folders/here/file-name.jpg`"
+      responses:
+        '201':
+          description: File was uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  fileEntry:
+                    $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /uploads-new/init:
+    post:
+      tags:
+        - Uploads-new
+      summary: Start a new upload session
+      operationId: initNewUpload
+      description: |
+        Creates an upload session and lets the server choose the upload mode.
+
+        Use this endpoint before uploading through the new upload API. The server validates the user's plan, storage space, workspace access and storage availability, then returns an `uploadSessionId`.
+
+        The server follows the same upload strategy as the web drive uploader:
+
+        - S3 storage with direct upload enabled and file size under 100MB: `uploadMode=s3-single`. Upload the file with one `PUT` request to `next.url`, then call `next.completeUrl`.
+        - S3 storage with direct upload enabled and file size 100MB or more: `uploadMode=s3-multipart`. Split the file into chunks using `partSize`, request signed URLs for part numbers, upload each chunk directly to S3, then call `/uploads-new/{sessionId}/complete`.
+        - Non-S3 storage or direct upload disabled and file size under 4MB: `uploadMode=single`. Send the file to `/uploads-new/{sessionId}/file`.
+        - Non-S3 storage or direct upload disabled and file size 4MB or more: `uploadMode=tus`. Use the existing TUS upload endpoint and metadata returned in `next.metadata`, then call `next.completeUrl` with the final `uploadKey`.
+
+        `storageLocationId`, S3 object key, bucket and multipart upload id are intentionally not returned. They are kept in the server-side session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewUploadInitRequest'
+      responses:
+        '201':
+          description: Upload session was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewUploadInitResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid upload metadata or not enough storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /uploads-new/{sessionId}/file:
+    post:
+      tags:
+        - Uploads-new
+      summary: Upload a file for a server-side single-request session
+      operationId: uploadNewSingleFile
+      description: |
+        Uploads the actual file for sessions where `/uploads-new/init` returned `uploadMode=single`.
+
+        The server uses the actual uploaded file metadata as the final source of truth. If the file size differs from the size provided during init, final validation uses the actual file size.
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Upload session id returned by `/uploads-new/init`
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File content to upload
+      responses:
+        '201':
+          description: File was uploaded and registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewUploadFileEntryResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: Upload session was not found or does not belong to current user
+        '422':
+          description: Invalid file or storage validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /uploads-new/{sessionId}/parts/sign:
+    post:
+      tags:
+        - Uploads-new
+      summary: Sign S3 multipart upload parts
+      operationId: signNewUploadParts
+      description: |
+        Returns temporary signed URLs for multipart part numbers.
+
+        This endpoint does not upload file bytes. It only asks the Files.ir API to create signed S3 URLs for the requested part numbers.
+
+        Use this endpoint only when `/uploads-new/init` returned `uploadMode=s3-multipart`. The client should split the file into chunks using the `partSize` returned by init. Part numbers start at `1` and must not exceed `10000`.
+
+        After this endpoint returns, upload each chunk with `PUT` to the matching signed URL returned in the response. These `PUT` requests go directly to S3, not to the Files.ir API base URL. Save the `ETag` response header from S3 for each uploaded part; those ETags are required by `/uploads-new/{sessionId}/complete`.
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Upload session id returned by `/uploads-new/init`
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewUploadSignPartsRequest'
+      responses:
+        '200':
+          description: Signed URLs were generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewUploadSignPartsResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: Upload session was not found or does not belong to current user
+        '422':
+          description: Invalid part numbers or storage validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /uploads-new/{sessionId}/complete:
+    post:
+      tags:
+        - Uploads-new
+      summary: Complete a direct S3, S3 multipart or TUS upload
+      operationId: completeNewUpload
+      description: |
+        Completes an upload session and creates the final file entry.
+
+        For `s3-single`, call this endpoint after the file was uploaded to `next.url`. No request body is required.
+
+        For `s3-multipart`, call this endpoint only after every `PUT` request to the signed S3 URLs has completed successfully. Send all uploaded parts with their `PartNumber` and `ETag` values. After S3 completes the upload, the server reads the final object metadata from S3 and uses the actual object size and content type when creating the file entry.
+
+        For `tus`, send the final `uploadKey` returned in the TUS upload URL. This endpoint will finalize the TUS upload using the existing project flow.
+
+        If the declared init size differs from the actual uploaded file or S3 object, final metadata is corrected from the actual uploaded content.
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Upload session id returned by `/uploads-new/init`
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NewUploadCompleteRequest'
+      responses:
+        '200':
+          description: Upload was completed and file entry was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NewUploadFileEntryResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: Upload session was not found or does not belong to current user
+        '422':
+          description: S3 completion failed or metadata validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /uploads-new/{sessionId}:
+    delete:
+      tags:
+        - Uploads-new
+      summary: Cancel an upload session
+      operationId: abortNewUpload
+      description: |
+        Cancels a pending upload session. For S3 multipart sessions, the server also attempts to abort the remote multipart upload.
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          description: Upload session id returned by `/uploads-new/init`
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload session was cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /drive/file-entries:
+    get:
+      tags:
+        - Files and Folders
+      summary: Get file entries
+      description: Get the list of all file entries you have access to
+      operationId: indexEntry
+      parameters:
+        - name: perPage
+          in: query
+          description: How many entries to return per page
+          schema:
+            type: 'integer'
+            format: 'int64'
+            default: 50
+        - name: deletedOnly
+          in: query
+          description: Whether only trashed entries should be returned
+          schema:
+            type: 'boolean'
+        - name: starredOnly
+          in: query
+          description: Whether only starred entries should be returned
+          schema:
+            type: 'boolean'
+        - name: recentOnly
+          in: query
+          description: Whether only recent entries should be returned
+          schema:
+            type: 'boolean'
+        - name: sharedOnly
+          in: query
+          description: Whether only entries that have been shared with you should be returned
+          schema:
+            type: 'boolean'
+        - name: query
+          in: query
+          description: Search query entry names should be filtered on
+          schema:
+            type: 'string'
+        - name: type
+          in: query
+          description: File type entries should be filtered on
+          schema:
+            type: 'string'
+            enum:
+              - 'folder'
+              - 'image'
+              - 'text'
+              - 'audio'
+              - 'video'
+              - 'pdf'
+        - name: parentIds
+          in: query
+          description: Only entries that are children of specified folders will be returned
+          explode: false
+          schema:
+            type: array
+            items:
+              type: string
+        - name: workspaceId
+          in: query
+          description: Only return entries in specified workspace
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /file-entries/delete:
+    post:
+      tags:
+        - Files and Folders
+      summary: Move entries to trash or delete permanently
+      description: Permanently deleting entries (`deleteForever=true`) only works for items that are already in trash.
+      operationId: entriesDelete
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entryIds:
+                  description: list of entry IDs to delete
+                  type: array
+                  items:
+                    type: string
+                deleteForever:
+                  description: Whether entries should be deleted permanently, instead of being moved to trash. Only applies to entries already in trash.
+                  type: string
+                  example: false
+      responses:
+        '200':
+          description: Entries deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /file-entries/{entryId}:
+    get:
+      tags:
+        - Files and Folders
+      summary: Download a file entry
+      description: Retrieve the binary contents of a file entry. Optionally supply `thumbnail=1` to fetch the generated thumbnail instead of the original file or pass a preview/access token for shared files.
+      parameters:
+        - in: path
+          name: entryId
+          schema:
+            type: integer
+          required: true
+          description: ID of the file entry to download
+        - in: query
+          name: thumbnail
+          schema:
+            type: boolean
+          description: When true and the file has a thumbnail, return the thumbnail instead of the original file
+        - in: query
+          name: preview_token
+          schema:
+            type: string
+          description: Temporary preview token that grants read-only access without requiring authentication headers
+        - in: query
+          name: accessToken
+          schema:
+            type: string
+          description: Personal access token to use when the Authorization header cannot be sent
+      operationId: entryDownload
+      responses:
+        '200':
+          description: Binary file stream
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: File entry not found
+    put:
+      tags:
+        - Files and Folders
+      summary: Update an existing file entry
+      parameters:
+        - in: path
+          name: entryId
+          schema:
+            type: integer
+          required: true
+      operationId: entryUpdate
+      responses:
+        '200':
+          description: Entry updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  fileEntry:
+                    $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: 'New name for the entry'
+                description:
+                  type: string
+                  example: 'New description for the entry'
+
+  /folders:
+    post:
+      tags:
+        - Files and Folders
+      summary: Create a new folder
+      operationId: createFolder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: 'new folder name'
+                parentId:
+                  type: integer
+                  description: 'ID of parent folder or null if it should be created at root'
+                  example: null
+      responses:
+        '200':
+          description: Folder created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  folder:
+                    $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /file-entries/move:
+    post:
+      tags:
+        - Files and Folders
+      summary: Move specified entries to another folder or workspace
+      description: |
+        Move one or more file entries to a new folder. If `targetWorkspaceId` is provided, the files will also be transferred into that workspace (setting it to `0` moves them back to the personal workspace).
+      operationId: entriesMove
+      responses:
+        '200':
+          description: File entries moved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - entryIds
+              properties:
+                entryIds:
+                  description: List of entry ids
+                  type: array
+                  items:
+                    type: integer
+                    format: 'int32'
+                destinationId:
+                  type: integer
+                  format: 'int32'
+                  description: ID of folder specified entries should be moved to
+                  example: null
+                targetWorkspaceId:
+                  type: integer
+                  format: 'int32'
+                  description: ID of workspace that should own the entries after the move. Omit or set to 0 to keep them in the current workspace.
+                  example: 15
+              example:
+                entryIds:
+                  - 1
+                  - 2
+                  - 3
+                destinationId: null
+                targetWorkspaceId: 15
+  /file-entries/duplicate:
+    post:
+      tags:
+        - Files and Folders
+      summary: Duplicate specified entries
+      operationId: entriesCopy
+      responses:
+        '200':
+          description: File entries duplicated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  entries:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FileEntry'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - entryIds
+              properties:
+                entryIds:
+                  description: List of entry ids
+                  type: array
+                  items:
+                    type: integer
+                    format: 'int32'
+                destinationId:
+                  type: integer
+                  format: 'int32'
+                  description: ID of folder specified entries should be moved to
+                  example: null
+  /file-entries/restore:
+    post:
+      tags:
+        - Files and Folders
+      summary: Restore file entries from trash to original folder
+      operationId: entriesRestore
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - entryIds
+              properties:
+                entryIds:
+                  description: List of entry IDs
+                  type: array
+                  items:
+                    type: integer
+                    format: 'int32'
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /file-entries/{entryId}/share:
+    post:
+      tags:
+        - Sharing
+      summary: Share file or folder with specified users
+      parameters:
+        - in: path
+          name: entryId
+          schema:
+            type: integer
+          required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                emails:
+                  type: array
+                  items:
+                    type: string
+                    example: example@gmail.com
+                permissions:
+                  type: array
+                  items:
+                    type: string
+                    example: edit
+                    enum:
+                      - view
+                      - edit
+                      - download
+      responses:
+        '200':
+          description: Shared file entry successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /file-entries/{entryId}/change-permissions:
+    put:
+      tags:
+        - Sharing
+      summary: Change permissions user has for shared entries
+      parameters:
+        - in: path
+          name: entryId
+          schema:
+            type: integer
+          required: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: integer
+                permissions:
+                  type: array
+                  items:
+                    type: string
+                    example: edit
+                    enum:
+                      - view
+                      - edit
+                      - download
+      responses:
+        '200':
+          description: Changed permissions successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /file-entries/{entryId}/unshare:
+    delete:
+      tags:
+        - Sharing
+      summary: Unshare file or folder with specified user
+      parameters:
+        - in: path
+          name: entryId
+          schema:
+            type: integer
+            example: 1
+          required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: integer
+      responses:
+        '200':
+          description: Unshared file entry successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /file-entries/star:
+    post:
+      tags:
+        - Starring
+      summary: Mark specified entries as starred
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entryIds:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: Marked as starred successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  tag:
+                    $ref: '#/components/schemas/Tag'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /file-entries/unstar:
+    post:
+      tags:
+        - Starring
+      summary: Unmark specified entries as starred
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                entryIds:
+                  type: array
+                  items:
+                    type: integer
+      responses:
+        '200':
+          description: Unmarked as starred successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  tag:
+                    $ref: '#/components/schemas/Tag'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /file-entries/{entryId}/shareable-link:
+    get:
+      tags:
+        - Shareable Links
+      summary: Retrieve shareable link for specified entry
+      operationId: getShareableLink
+      parameters:
+        - name: entryId
+          in: path
+          description: ID or hash of entry for which to get shareable link
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Shareable-Link-Response'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: File entry or shareable link not found
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+    post:
+      tags:
+        - Shareable Links
+      summary: Create new shareable link for specified entry
+      operationId: createShareableLink
+      parameters:
+        - name: entryId
+          in: path
+          description: ID or hash of entry for which to get shareable link
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  example: 'new password'
+                expires_at:
+                  type: string
+                  description: '2021-03-06T17:34:00.000000Z'
+                allow_edit:
+                  type: boolean
+                  example: false
+                allow_download:
+                  type: boolean
+                  example: false
+      responses:
+        '200':
+          description: Shareable link created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  link:
+                    $ref: '#/components/schemas/ShareableLink'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /file_entries/{entryId}/shareable-link:
+    put:
+      tags:
+        - Shareable Links
+      summary: Update shareable link details
+      operationId: updateShareableLink
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                  example: 'new password'
+                expires_at:
+                  type: string
+                  description: '2021-03-06T17:34:00.000000Z'
+                allow_edit:
+                  type: boolean
+                  example: false
+                allow_download:
+                  type: boolean
+                  example: false
+      responses:
+        '200':
+          description: Shareable link updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  link:
+                    $ref: '#/components/schemas/ShareableLink'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: Shareable link not found
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+    delete:
+      tags:
+        - Shareable Links
+      summary: Delete shareable link by ID
+      operationId: deleteShareableLink
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Shareable link deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '404':
+          description: Shareable link not found
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+
+  /auth/register:
+    post:
+      security: []
+      tags:
+        - Auth
+      summary: Register for a new account
+      operationId: register
+      responses:
+        '200':
+          description: User registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  user:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: 'example@gmail.com'
+                password:
+                  type: string
+                  example: 'password'
+                token_name:
+                  type: string
+                  example: 'iphone 12'
+  /auth/login:
+    post:
+      security: []
+      tags:
+        - Auth
+      summary: Get access token
+      description: 'Logs in specified user and returns user object along with access token. <br><br> Access Token is a string that enables Files.ir to verify that a request belongs to an authorized session. This token should be sent along with every request to Files.ir API in a authorization header: `Authorization: Bearer <Token>`.'
+      operationId: login
+      responses:
+        '200':
+          description: Operation successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  user:
+                    $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  example: 'example@gmail.com'
+                password:
+                  type: string
+                  example: 'password'
+                token_name:
+                  type: string
+                  example: 'iphone 12'
+  /me/workspaces:
+    get:
+      tags:
+        - Workspaces
+      summary: List user workspaces
+      description: Retrieve up to 20 workspaces the authenticated user owns or belongs to.
+      operationId: listUserWorkspaces
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  workspaces:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspace:
+    get:
+      tags:
+        - Workspaces
+      summary: List workspaces
+      description: Retrieve paginated workspaces. Admins can pass `userId` to list workspaces owned by or joined by a specific user.
+      operationId: listWorkspaces
+      parameters:
+        - name: userId
+          in: query
+          required: false
+          description: Only return workspaces for this user. Requires permission to list workspaces for other users.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 1
+        - name: perPage
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 15
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  pagination:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+    post:
+      tags:
+        - Workspaces
+      summary: Create workspace
+      description: Create a normal workspace or an owner-backed workspace. When `use_owner_storage` is `true`, files in this workspace are owned by the workspace owner and count against the owner's storage quota.
+      operationId: createWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrupdateWorkspacePayload'
+            examples:
+              normal:
+                summary: Normal workspace
+                value:
+                  name: Marketing workspace
+              ownerBacked:
+                summary: Owner-backed workspace with storage limit
+                value:
+                  name: Agency workspace
+                  use_owner_storage: true
+                  storage_limit: 10737418240
+      responses:
+        '200':
+          description: Workspace created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  workspace:
+                    $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /workspace/{workspaceId}:
+    get:
+      tags:
+        - Workspaces
+      summary: Get workspace
+      description: Retrieve a single workspace by its unique ID.
+      operationId: showWorkspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: ID of the workspace to fetch.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  workspace:
+                    $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+    put:
+      tags:
+        - Workspaces
+      summary: Update workspace
+      description: Update workspace name and owner-backed storage limit. `storage_limit` is in bytes and can be `null` for unlimited owner storage. Existing owner-backed mode cannot be disabled from the app UI.
+      operationId: updateWorkspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: ID of the workspace to update.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrupdateWorkspacePayload'
+            examples:
+              rename:
+                summary: Rename workspace
+                value:
+                  name: Design workspace
+              updateStorageLimit:
+                summary: Update owner-backed storage limit
+                value:
+                  name: Agency workspace
+                  use_owner_storage: true
+                  storage_limit: 21474836480
+      responses:
+        '200':
+          description: Workspace updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  workspace:
+                    $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+    delete:
+      tags:
+        - Workspaces
+      summary: Delete workspace
+      description: Delete one or more workspaces. Multiple IDs can be passed as a comma-separated list.
+      operationId: deleteWorkspace
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          description: Workspace ID, or comma-separated workspace IDs.
+          schema:
+            type: string
+            example: '5,6'
+      responses:
+        '200':
+          description: Workspace deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspace/{workspaceId}/invite:
+    post:
+      tags:
+        - Workspaces
+      summary: Invite members to workspace
+      operationId: inviteWorkspaceMembers
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - emails
+                - roleId
+              properties:
+                emails:
+                  type: array
+                  items:
+                    type: string
+                    format: email
+                  example:
+                    - editor@example.com
+                    - viewer@example.com
+                roleId:
+                  type: integer
+                  format: int64
+                  example: 8
+      responses:
+        '200':
+          description: Invites created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  invites:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkspaceInvite'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /workspace/{workspaceId}/{workspaceInvite}/resend:
+    post:
+      tags:
+        - Workspaces
+      summary: Resend workspace invitation
+      operationId: resendWorkspaceInvite
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: workspaceInvite
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Invite resent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  invite:
+                    $ref: '#/components/schemas/WorkspaceInvite'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspace/{workspaceId}/member/{memberId}/change-role:
+    post:
+      tags:
+        - Workspaces
+      summary: Change workspace member role
+      operationId: changeWorkspaceMemberRole
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: memberId
+          in: path
+          required: true
+          description: Workspace member record ID.
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceRoleChangePayload'
+      responses:
+        '200':
+          description: Role changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /workspace/{workspaceId}/invite/{inviteId}/change-role:
+    post:
+      tags:
+        - Workspaces
+      summary: Change pending invite role
+      operationId: changeWorkspaceInviteRole
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: inviteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorkspaceRoleChangePayload'
+      responses:
+        '200':
+          description: Role changed
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /workspace/{workspaceId}/member/{userId}:
+    delete:
+      tags:
+        - Workspaces
+      summary: Remove workspace member
+      description: Remove another member from a workspace, or leave the workspace when `userId` is the current user's ID.
+      operationId: removeWorkspaceMember
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspace/invite/{workspaceInvite}:
+    delete:
+      tags:
+        - Workspaces
+      summary: Delete or decline workspace invitation
+      operationId: deleteWorkspaceInvite
+      parameters:
+        - name: workspaceInvite
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Invite deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspace/join/{workspaceInvite}:
+    get:
+      tags:
+        - Workspaces
+      summary: Join workspace by invitation
+      description: Authenticated JSON requests receive the joined workspace. Browser requests may redirect to login, register, or the workspace home route.
+      operationId: joinWorkspace
+      parameters:
+        - name: workspaceInvite
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Joined workspace
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  workspace:
+                    $ref: '#/components/schemas/Workspace'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /workspaces/{workspaceId}/activity-logs:
+    get:
+      tags:
+        - Workspaces
+      summary: List workspace activity logs
+      operationId: listWorkspaceActivityLogs
+      parameters:
+        - name: workspaceId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 1
+        - name: perPage
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 15
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  pagination:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/WorkspaceActivityLog'
+                      total:
+                        type: integer
+                        example: 42
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /taggable/{taggableType}/{taggableId}/list-tags:
+    get:
+      tags:
+        - Tags
+      summary: List tags for a specific item
+      description: Returns tags attached to a specific taggable model (for files, use taggableType=fileEntry).
+      operationId: listTaggableTags
+      parameters:
+        - name: taggableType
+          in: path
+          required: true
+          schema:
+            type: string
+            example: fileEntry
+        - name: taggableId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: type
+          in: query
+          description: Only return tags of specified type.
+          schema:
+            type: string
+        - name: notType
+          in: query
+          description: Exclude tags of specified type.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  tags:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tag'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+  /taggable/attach-tag:
+    post:
+      tags:
+        - Tags
+      summary: Attach tag to items
+      description: 'Note: userId can be set only by admins; otherwise current user is used.'
+      operationId: attachTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tagName
+                - taggableType
+                - taggableIds
+              properties:
+                tagName:
+                  type: string
+                  example: api tag test
+                tagType:
+                  type: string
+                  nullable: true
+                  example: custom
+                taggableType:
+                  type: string
+                  example: fileEntry
+                taggableIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                userId:
+                  type: integer
+                  format: int64
+                  nullable: true
+      responses:
+        '200':
+          description: Tag attached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  tag:
+                    $ref: '#/components/schemas/Tag'
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /taggable/detach-tag:
+    post:
+      tags:
+        - Tags
+      summary: Detach tag from items
+      operationId: detachTag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tagId
+                - taggableType
+                - taggableIds
+              properties:
+                tagId:
+                  type: integer
+                  format: int64
+                taggableType:
+                  type: string
+                  example: fileEntry
+                taggableIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+      responses:
+        '200':
+          description: Tag detached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+  /taggable/sync-tags:
+    post:
+      tags:
+        - Tags
+      summary: Sync tags on items
+      description: 'Note: userId can be set only by admins; otherwise current user is used.'
+      operationId: syncTags
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - taggableType
+                - taggableIds
+                - tagIds
+              properties:
+                taggableType:
+                  type: string
+                  example: fileEntry
+                taggableIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                tagIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                userId:
+                  type: integer
+                  format: int64
+                  nullable: true
+                detach:
+                  type: boolean
+                  nullable: true
+      responses:
+        '200':
+          description: Tags synced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        '401':
+          $ref: '#/components/schemas/401-Response'
+        '403':
+          $ref: '#/components/schemas/403-Response'
+        '422':
+          description: Invalid data specified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/422-Response'
+components:
+  schemas:
+    SuccessResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+    CrupdateWorkspacePayload:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          minLength: 3
+          example: Marketing workspace
+        use_owner_storage:
+          type: boolean
+          description: When true, workspace files are stored under the workspace owner and count against the owner's storage quota.
+          default: false
+          example: true
+        storage_limit:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 1048576
+          description: Owner-backed workspace storage limit in bytes. Leave null for unlimited owner storage. Cannot exceed the owner's remaining available storage when enforced.
+          example: 10737418240
+    WorkspaceRoleChangePayload:
+      type: object
+      required:
+        - roleId
+      properties:
+        roleId:
+          type: integer
+          format: int64
+          example: 8
+    NewUploadInitRequest:
+      type: object
+      required:
+        - filename
+        - size
+      properties:
+        filename:
+          type: string
+          example: big-video.mp4
+          description: Original filename. The server extracts the extension from this value.
+        size:
+          type: integer
+          format: int64
+          example: 209715200
+          description: Declared file size in bytes. The server uses this for initial plan, quota and upload mode checks. Final metadata is corrected from the actual uploaded file or S3 object.
+        parentId:
+          type: integer
+          nullable: true
+          example: null
+          description: Folder ID where the file should be uploaded. If omitted or null, upload goes to root.
+        workspaceId:
+          type: integer
+          nullable: true
+          example: null
+          description: Workspace ID where the file should be uploaded. If omitted, the server can infer it from parentId when the parent folder belongs to a workspace.
+    NewUploadInitResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        uploadSessionId:
+          type: string
+          example: 984c6f0a-4a19-4969-bc20-123456789abc
+          description: Server-side upload session id. Use this id with the next upload endpoints.
+        uploadMode:
+          type: string
+          enum:
+            - single
+            - s3-single
+            - s3-multipart
+            - tus
+          example: s3-multipart
+          description: Selected upload mode. `single` uploads the whole file to this API. `s3-single` uploads one file directly to a signed S3 URL. `s3-multipart` uploads chunks directly to signed S3 URLs. `tus` uses the existing resumable TUS endpoint.
+        partSize:
+          type: integer
+          format: int64
+          nullable: true
+          example: 20971520
+          description: Chunk size in bytes for `s3-multipart` uploads. Null for other modes.
+        next:
+          type: object
+          nullable: true
+          description: Instructions for the next upload step. Present for `s3-single` and `tus` modes.
+          properties:
+            method:
+              type: string
+              example: PUT
+              description: Method or protocol for the next step.
+            url:
+              type: string
+              format: uri
+              example: https://s3.example.com/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256
+              description: Upload URL. For `s3-single`, send the whole file to this URL with PUT. For `tus`, this is the TUS endpoint.
+            headers:
+              type: object
+              nullable: true
+              additionalProperties:
+                type: string
+              example:
+                Content-Type: video/mp4
+                x-amz-acl: private
+              description: Headers that should be sent with the next upload request when provided.
+            completeUrl:
+              type: string
+              format: uri
+              example: https://files.example.com/api/v1/uploads-new/984c6f0a-4a19-4969-bc20-123456789abc/complete
+              description: URL to call after the direct S3 or TUS upload finishes.
+            metadata:
+              type: object
+              nullable: true
+              additionalProperties:
+                type: string
+              description: Metadata that should be sent to the TUS endpoint when `uploadMode=tus`.
+    NewUploadSignPartsRequest:
+      type: object
+      required:
+        - partNumbers
+      properties:
+        partNumbers:
+          type: array
+          example:
+            - 1
+            - 2
+            - 3
+          description: S3 multipart part numbers to sign. Part numbers start at 1 and must be between 1 and 10000.
+          items:
+            type: integer
+            minimum: 1
+            maximum: 10000
+    NewUploadSignedPart:
+      type: object
+      properties:
+        partNumber:
+          type: integer
+          example: 1
+        url:
+          type: string
+          format: uri
+          example: https://s3.example.com/bucket/object?X-Amz-Algorithm=AWS4-HMAC-SHA256
+          description: Temporary S3 URL for this part. Send a PUT request to this exact URL with the raw bytes of the matching file chunk. Do not send this PUT request to the Files.ir API base URL.
+    NewUploadSignPartsResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        urls:
+          type: array
+          items:
+            $ref: '#/components/schemas/NewUploadSignedPart'
+    NewUploadCompleteRequest:
+      type: object
+      properties:
+        parts:
+          type: array
+          description: Required for `s3-multipart`. Uploaded S3 parts with the ETag response header returned by S3 for each part.
+          items:
+            type: object
+            required:
+              - PartNumber
+              - ETag
+            properties:
+              PartNumber:
+                type: integer
+                example: 1
+              ETag:
+                type: string
+                example: '"9b2cf535f27731c974343645a3985328"'
+        uploadKey:
+          type: string
+          example: 01hxyzUploadKey
+          description: Required for `tus`. The upload key from the final TUS upload URL.
+    NewUploadFileEntryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        fileEntry:
+          $ref: '#/components/schemas/FileEntry'
+    FileEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+          example: image.png
+        file_name:
+          type: string
+          example: j6oWHDG1z613UqFHLZpE1Yrqngw0N8XLuGNLNWJV
+          description: actual file name for this entry on storage
+        file_size:
+          type: integer
+          format: int64
+          example: 111863
+          description: In bytes
+        parent_id:
+          type: integer
+          format: int64
+          example: 1
+          description: Parent folder ID
+        workspace_id:
+          type: integer
+          format: int64
+          example: 0
+          description: Workspace ID this entry belongs to. `0` means personal drive.
+        parent:
+          $ref: '#/components/schemas/FileEntry'
+        thumbnail:
+          type: string
+          example: thumbnail.png
+          description: Relative path to thumbnail image for the file (if it exists)
+        mime:
+          type: string
+          example: image/png
+        url:
+          type: string
+          example: secure/uploads/3260
+          description: relative url for previewing file or folder contents
+        hash:
+          type: string
+          example: MzI2MHxwYWRkaQ
+        type:
+          type: string
+          enum:
+            - 'image'
+            - 'folder'
+            - 'text'
+            - 'audio'
+            - 'video'
+            - 'pdf'
+        description:
+          type: string
+          example: Example description entered by user
+        deleted_at:
+          type: string
+          example: '2021-02-23T14:42:38.000000Z'
+          description: date entry was moved to trash (if it's in trash currently)
+        created_at:
+          type: string
+          example: '2021-02-23T14:42:38.000000Z'
+          description: date entry was uploaded
+        updated_at:
+          type: string
+          example: '2021-02-23T14:42:38.000000Z'
+          description: date entry was last modified (content, name or location changed)
+        path:
+          type: string
+          example: '3260/3261/3262'
+          description: full path of parent folder IDs for this entry up to root
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: integer
+                format: int64
+              email:
+                type: string
+                example: 'example@gmail.com'
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        access_token:
+          type: string
+          description: Access token that can be used to authenticate API requests for this user
+        display_name:
+          type: string
+        first_name:
+          type: string
+        last_name:
+          type: string
+        email:
+          type: string
+        created_at:
+          type: string
+          example: '2021-02-23T14:42:38.000000Z'
+        updated_at:
+          type: string
+          example: '2021-02-23T14:42:38.000000Z'
+    Workspace:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 5
+        name:
+          type: string
+          example: Marketing workspace
+        owner_id:
+          type: integer
+          format: int64
+          example: 3
+        use_owner_storage:
+          type: boolean
+          example: false
+        storage_limit:
+          type: integer
+          format: int64
+          nullable: true
+          example: null
+        storage_used:
+          type: integer
+          format: int64
+          example: 0
+        owner_max_upload_size:
+          type: integer
+          format: int64
+          nullable: true
+          description: Maximum allowed single file upload size for the workspace owner when owner-backed storage is enabled.
+          example: 5368709120
+        owner_plan_name:
+          type: string
+          nullable: true
+          description: Workspace owner's plan name when owner-backed storage is enabled.
+          example: Pro
+        members_count:
+          type: integer
+          format: int32
+          example: 4
+        created_at:
+          type: string
+          format: date-time
+          example: '2025-10-21T14:42:38.000000Z'
+        updated_at:
+          type: string
+          format: date-time
+          example: '2025-10-21T14:42:38.000000Z'
+        owner:
+          $ref: '#/components/schemas/WorkspaceMember'
+          nullable: true
+        current_user:
+          $ref: '#/components/schemas/WorkspaceMember'
+          nullable: true
+        members:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/WorkspaceMember'
+        invites:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/WorkspaceInvite'
+      required:
+        - id
+        - name
+        - owner_id
+        - members_count
+    WorkspaceMember:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: ID of the user.
+          example: 42
+        email:
+          type: string
+          format: email
+          example: member@example.com
+        workspace_id:
+          type: integer
+          format: int64
+          example: 5
+        joined_at:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2025-10-21T12:05:31.000000Z'
+        role_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: 7
+        is_owner:
+          type: boolean
+          example: false
+        member_id:
+          type: integer
+          format: int64
+          example: 13
+        first_name:
+          type: string
+          nullable: true
+          example: 'Alex'
+        last_name:
+          type: string
+          nullable: true
+          example: 'Smith'
+        image:
+          type: string
+          nullable: true
+          example: 'https://cdn.files.ir/avatars/alex.jpg'
+        role_name:
+          type: string
+          example: 'Editor'
+        name:
+          type: string
+          example: 'Alex Smith'
+        model_type:
+          type: string
+          example: member
+        can_view_activity_logs:
+          type: boolean
+          example: true
+        permissions:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/WorkspacePermission'
+      required:
+        - id
+        - email
+        - member_id
+        - is_owner
+        - model_type
+        - name
+    WorkspacePermission:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 12
+        name:
+          type: string
+          example: workspace_activity_logs.view
+        restrictions:
+          type: object
+          nullable: true
+          additionalProperties: true
+    WorkspaceInvite:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 9b5026a0-2b67-4f4d-bfa3-53e96e3f87f5
+        workspace_id:
+          type: integer
+          format: int64
+          example: 5
+        role_name:
+          type: string
+          nullable: true
+          example: 'Workspace Editor'
+        email:
+          type: string
+          format: email
+          example: invitee@example.com
+        role_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: 8
+        image:
+          type: string
+          nullable: true
+          example: 'https://cdn.files.ir/avatars/invitee.jpg'
+    WorkspaceActivityLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 101
+        workspace_id:
+          type: integer
+          format: int64
+          example: 5
+        user_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: 42
+        action:
+          type: string
+          example: invited_user
+        subject_type:
+          type: string
+          nullable: true
+          example: user
+        subject_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: 77
+        subject_name:
+          type: string
+          nullable: true
+          example: member@example.com
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+          example: '2025-10-21T14:42:38.000000Z'
+        updated_at:
+          type: string
+          format: date-time
+          example: '2025-10-21T14:42:38.000000Z'
+        user:
+          type: object
+          nullable: true
+          additionalProperties: true
+    Tag:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+      xml:
+        name: Tag
+    ShareableLink:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        hash:
+          type: string
+          example: 3h8N1nxZq7WtyRmXDIosFupSl9MCrD
+          description: ID for link that will be visible in url
+        password:
+          type: string
+          example: $2y$10$BI8kz6zFeB0CA0P425eMSe7KJcm8OKjWijHTQrRP.cjqRtynMq4Sy
+          description: Passwords are hashed, so this will not match the password that was entered in plain text
+        user_id:
+          type: integer
+          format: int64
+          description: ID of user that created this link
+        entry_id:
+          type: integer
+          format: int64
+          description: ID of file entry this link is attached to
+        entry:
+          $ref: '#/components/schemas/FileEntry'
+        expires_at:
+          type: string
+          example: '2021-03-06T17:34:00.000000Z'
+        allow_edit:
+          type: boolean
+          example: false
+        allow_download:
+          type: boolean
+          example: false
+    Shareable-Link-Response:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        link:
+          $ref: '#/components/schemas/ShareableLink'
+        folderChildren:
+          description: If link is for folder, this will list immediate children of that folder
+          type: array
+          items:
+            $ref: '#/components/schemas/FileEntry'
+        errors:
+          type: object
+          properties:
+            some_data_1:
+              type: string
+              example: Error message for data 1
+            some_data_2:
+              type: string
+              example: Error message for data 2
+    401-Response:
+      description: Unauthenticated. Either access token is not provided or is invalid.
+    403-Response:
+      description: Unauthorized access. You don't have permissions required to perform this operation.
+    422-Response:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        message:
+          type: string
+          example: 'Reason for the error'
+        errors:
+          type: object
+          properties:
+            some_data_1:
+              type: string
+              example: Error message for data 1
+            some_data_2:
+              type: string
+              example: Error message for data 2
+
+  securitySchemes:
+    accessToken:
+      type: http
+      scheme: bearer

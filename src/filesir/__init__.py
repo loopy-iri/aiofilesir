@@ -1,0 +1,77 @@
+"""Asynchronous Python client for the Files.ir REST API."""
+from __future__ import annotations
+
+from .client import FilesIrClient
+from .exceptions import (
+    AuthenticationError,
+    FilesIrError,
+    ForbiddenError,
+    NetworkError,
+    NotFoundError,
+    RateLimitError,
+    ServerError,
+    UploadError,
+    ValidationError,
+)
+from .models import (
+    FileEntry,
+    FileEntryUserStub,
+    NewUploadCompletedPart,
+    NewUploadCompleteRequest,
+    NewUploadFileEntryResponse,
+    NewUploadInitRequest,
+    NewUploadInitResponse,
+    NewUploadNext,
+    NewUploadSignedPart,
+    NewUploadSignPartsResponse,
+    Page,
+    ShareableLink,
+    ShareableLinkResponse,
+    SpaceUsage,
+    Tag,
+    User,
+    Workspace,
+    WorkspaceActivityLog,
+    WorkspaceInvite,
+    WorkspaceMember,
+    WorkspacePermission,
+)
+from .transport import RetryPolicy, Transport
+
+__all__ = [
+    "AuthenticationError",
+    "FileEntry",
+    "FileEntryUserStub",
+    "FilesIrClient",
+    "FilesIrError",
+    "ForbiddenError",
+    "NetworkError",
+    "NewUploadCompleteRequest",
+    "NewUploadCompletedPart",
+    "NewUploadFileEntryResponse",
+    "NewUploadInitRequest",
+    "NewUploadInitResponse",
+    "NewUploadNext",
+    "NewUploadSignPartsResponse",
+    "NewUploadSignedPart",
+    "NotFoundError",
+    "Page",
+    "RateLimitError",
+    "RetryPolicy",
+    "ServerError",
+    "ShareableLink",
+    "ShareableLinkResponse",
+    "SpaceUsage",
+    "Tag",
+    "Transport",
+    "UploadError",
+    "User",
+    "ValidationError",
+    "Workspace",
+    "WorkspaceActivityLog",
+    "WorkspaceInvite",
+    "WorkspaceMember",
+    "WorkspacePermission",
+]
+
+__version__ = "0.1.0"
